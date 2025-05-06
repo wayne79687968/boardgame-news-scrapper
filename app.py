@@ -125,13 +125,10 @@ def crawl_meeples_herald():
                 detail_soup = BeautifulSoup(detail_res.text, 'html.parser')
                 content_tag = detail_soup.find('div', class_='td-post-content')
                 content = content_tag.get_text(separator='\\n', strip=True) if content_tag else None
-                author_tag = detail_soup.select_one('div.td-post-author-name a')
-                author = author_tag.get_text(strip=True) if author_tag else None
                 time_tag = detail_soup.find('time')
                 published = time_tag['datetime'] if time_tag and time_tag.has_attr('datetime') else None
                 article.update({
                     "content": content,
-                    "author": author,
                     "published": published
                 })
             articles.append(article)
@@ -144,23 +141,123 @@ def crawl_meeples_herald():
         detail_soup = BeautifulSoup(detail_res.text, 'html.parser')
         content_tag = detail_soup.find('div', class_='td-post-content')
         content = content_tag.get_text(separator='\\n', strip=True) if content_tag else None
-        author_tag = detail_soup.select_one('div.td-post-author-name a')
-        author = author_tag.get_text(strip=True) if author_tag else None
         time_tag = detail_soup.find('time')
         published = time_tag['datetime'] if time_tag and time_tag.has_attr('datetime') else None
         first.update({
             "content": content,
-            "author": author,
             "published": published
         })
         articles[0] = first
+    return articles
+
+def crawl_tgn():
+    url = "https://www.tabletopgamingnews.com/feed"
+    res = requests.get(url, headers=HEADERS)
+    ns = {
+        'media': 'http://search.yahoo.com/mrss/',
+        'dc': 'http://purl.org/dc/elements/1.1/'
+    }
+    root = ET.fromstring(res.content)
+    channel = root.find('channel')
+    items = channel.findall('item')[:5]
+    articles = []
+    today = datetime.utcnow().date()
+    found_today = False
+    for idx, item in enumerate(items):
+        categories = [c.text for c in item.findall('category')]
+        image = None
+        media_content = item.find('media:content', ns)
+        if media_content is not None:
+            image = media_content.attrib.get('url')
+        pub_date_str = item.findtext('pubDate')
+        pub_date = None
+        if pub_date_str:
+            try:
+                pub_date = datetime.strptime(pub_date_str[:16], "%a, %d %b %Y").date()
+            except Exception:
+                pass
+        article = {
+            "title": item.findtext('title'),
+            "link": item.findtext('link'),
+            "creator": item.findtext('dc:creator', namespaces=ns),
+            "pubDate": pub_date_str,
+            "guid": item.findtext('guid'),
+            "categories": categories,
+            "image": image,
+            "description": item.findtext('description')
+        }
+        # 若日期為今天，進一步爬取內容
+        if pub_date == today:
+            found_today = True
+            detail_res = requests.get(article['link'], headers=HEADERS)
+            detail_soup = BeautifulSoup(detail_res.text, 'html.parser')
+            content_tag = detail_soup.select_one('div.entry-content.single-content')
+            content = content_tag.get_text(separator='\n', strip=True) if content_tag else None
+            time_tag = detail_soup.find('time')
+            published = time_tag['datetime'] if time_tag and time_tag.has_attr('datetime') else None
+            article.update({
+                "content": content,
+                "published": published
+            })
+        articles.append(article)
+    # 無論是否為今日新聞，第一則都要補抓內容
+    if articles and not found_today:
+        first = articles[0]
+        detail_res = requests.get(first['link'], headers=HEADERS)
+        detail_soup = BeautifulSoup(detail_res.text, 'html.parser')
+        content_tag = detail_soup.select_one('div.entry-content.single-content')
+        content = content_tag.get_text(separator='\n', strip=True) if content_tag else None
+        time_tag = detail_soup.find('time')
+        published = time_tag['datetime'] if time_tag and time_tag.has_attr('datetime') else None
+        first.update({
+            "content": content,
+            "published": published
+        })
+        articles[0] = first
+    return articles
+
+def crawl_boardgamewire():
+    url = "https://boardgamewire.com/"
+    res = requests.get(url, headers=HEADERS)
+    soup = BeautifulSoup(res.text, 'html.parser')
+    articles = []
+    for card in soup.select('article.entry-card')[:5]:
+        title_tag = card.select_one('h2.entry-title a')
+        link = title_tag['href'] if title_tag else None
+        title = title_tag.get_text(strip=True) if title_tag else None
+        image_tag = card.select_one('img')
+        image = image_tag['data-src'] if image_tag and image_tag.has_attr('data-src') else (image_tag['src'] if image_tag and image_tag.has_attr('src') else None)
+        author_tag = card.select_one('li.meta-author span[itemprop="name"]')
+        author = author_tag.get_text(strip=True) if author_tag else None
+        time_tag = card.select_one('li.meta-date time')
+        published = time_tag['datetime'] if time_tag and time_tag.has_attr('datetime') else None
+        articles.append({
+            "title": title,
+            "link": link,
+            "image": image,
+            "author": author,
+            "published": published
+        })
+    # 抓第一則詳細內容
+    if articles and articles[0]['link']:
+        detail_url = articles[0]['link']
+        detail_res = requests.get(detail_url, headers=HEADERS)
+        detail_soup = BeautifulSoup(detail_res.text, 'html.parser')
+        # 先嘗試 article .entry-content
+        content_tag = detail_soup.select_one('article .entry-content')
+        if not content_tag:
+            content_tag = detail_soup.find('div', class_='entry-content')
+        content = content_tag.get_text(separator='\n', strip=True) if content_tag else None
+        articles[0]['content'] = content
     return articles
 
 @app.route("/news")
 def get_news():
     return jsonify({
         "dicebreaker": crawl_dicebreaker(),
-        "meeples_herald": crawl_meeples_herald()
+        "meeples_herald": crawl_meeples_herald(),
+        "tgn": crawl_tgn(),
+        "boardgamewire": crawl_boardgamewire()
     })
 
 @app.route("/")
